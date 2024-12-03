@@ -295,7 +295,7 @@ print(confusionMatrix(as.factor(eval_classes),rf_test,mode = "everything"))
 
 ```
 
-Random Forest has the highest F-1 score for class 0 when run on the evaluation dataset, so it is being used for the unlabeled dataset. See report for full comparison between classifiers.
+Random Forest has the highest F-1 score for class 0 when run on the evaluation dataset, so it is being used for the unlabeled dataset. See report for full comparison between classifiers (Methods section) and for class-specific evaluation of limitations (Discussion section)
 
 Importing unlabeled dataset
 
