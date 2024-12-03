@@ -1,0 +1,471 @@
+---
+title: 'Assignment #2'
+author: "Akshay Deverakonda"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Loading libraries
+
+```{r}
+
+library(pacman)
+
+pacman::p_load(dplyr,tidyverse, caTools, tm, mlapi, e1071, caret, here, randomForest, scales, gtsummary)
+
+
+here::i_am("Assignment_2.Rmd")
+```
+
+Loading dataset
+
+```{r}
+
+full_dataset <- read.csv(here::here('TADA_Annotated_data_2024.csv'))
+table(full_dataset$class)
+
+
+```
+
+Annotated Data classifications:
+
+0 - Nonmedical use
+
+1 - Consumption (prescribed use)
+
+2 - Information/mention
+
+3 - Unrelated
+
+Preprocessing
+
+```{r}
+#Extracting only text from dataset
+all_texts <- full_dataset$text
+#Turning text into a corpus
+all_texts_corpus <- VCorpus(VectorSource(all_texts))
+#Lowercasing all tweets
+all_texts_corpus <- tm_map(all_texts_corpus, content_transformer(tolower))
+
+#Removing URLS
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x) 
+all_texts_corpus <- tm_map(all_texts_corpus, content_transformer(removeURL))
+
+#Removing mentions
+all_texts_corpus <- tm_map(all_texts_corpus, content_transformer(function(x) gsub("@\\w+", "", x)))  
+
+#Removing punctuation
+all_texts_corpus <- tm_map(all_texts_corpus, removePunctuation)
+#Removing stopwords
+all_texts_corpus <- tm_map(all_texts_corpus, removeWords,stopwords("english"))
+#Stemming document
+all_texts_corpus <- tm_map(all_texts_corpus, stemDocument)
+
+
+
+#Getting length
+length(all_texts_corpus)
+
+```
+
+Tokenizing words into ngrams(1:3)
+
+```{r}
+
+#Defining tokenizer function
+NLP_tokenizer <- function(x) {
+unlist(lapply(ngrams(words(x), 1:3), paste, collapse = "_"), use.names = FALSE)
+}
+
+#Creating tokenized corpus from the general corpus
+n_gram_corpus <- tm_map(all_texts_corpus,content_transformer(NLP_tokenizer))
+
+#Checking length of corpus
+length(n_gram_corpus)
+
+
+```
+Splitting pre-processed data into training and evaluation datasets
+
+```{r}
+
+#Setting seed for reproducibility
+set.seed(1234)
+
+#Splitting dataset
+split <- sample.split(full_dataset$class,SplitRatio = 0.8)
+
+#Splitting full corpus into training and evaluation corpuses
+training_ngram_corpus <- subset(n_gram_corpus, split==TRUE)
+eval_ngram_corpus <- subset(n_gram_corpus, split==FALSE)
+
+#Splitting classes into training and evaluation classes
+training_classes <- subset(full_dataset$class, split==TRUE)
+eval_classes <- subset(full_dataset$class, split==FALSE)
+
+
+```
+
+Splitting training into another training subset and validation subset
+
+```{r}
+
+#creating another set from the training set for hyperparameter optimization
+split <- sample.split(training_classes,SplitRatio = 0.8)
+
+#Splitting corpuses and classes to sub-training subset
+training_ngram_corpus_split <- subset(training_ngram_corpus, split==TRUE)
+training_classes_split <- subset(training_classes, split==TRUE)
+
+#Splitting corpuses and classes for validation subset
+validation_ngram_corpus <- subset(training_ngram_corpus, split==FALSE)
+validation_classes <- subset(training_classes,split == FALSE)
+```
+
+
+Creating document term matrices for sub-training and validation corpuses
+
+```{r}
+
+#Creating document term matrix from training 
+
+training_dct_matrix <- DocumentTermMatrix(training_ngram_corpus_split)
+
+#Removing sparse terms
+training_dct_matrix_sparse <- removeSparseTerms(training_dct_matrix,0.995)
+
+#Creating validation DTM with sparse terms removed
+val_dct_matrix_sparse <- DocumentTermMatrix(validation_ngram_corpus, list(dictionary=colnames(training_dct_matrix_sparse)))
+```
+
+
+Converting DTMs to dataframes and adding classifications back.
+
+```{r}
+
+#Converting sparse DTMs to dataframes
+training_term_matrix_df <- as.data.frame(as.matrix(training_dct_matrix_sparse))
+
+val_term_matrix_df <- as.data.frame(as.matrix(val_dct_matrix_sparse))
+
+#Making sure column names are valid R names
+colnames(training_term_matrix_df) <- make.names(colnames(training_term_matrix_df))
+
+colnames(val_term_matrix_df) <- make.names(colnames(val_dct_matrix_sparse))
+
+#Adding class labels to dataframe
+training_term_matrix_df$class <- training_classes_split
+training_term_matrix_df$class <-as.factor(training_term_matrix_df$class)
+```
+
+Classifier #1 - SVM. Optimizing the cost hyperparameter
+
+```{r}
+
+#Testing different kernels for SVM cost hyperparameter
+
+i = 1
+while (i <= 64){
+trained_model <- svm(class ~ ., data=training_term_matrix_df,cost=i)
+predictions <- predict(trained_model, newdata=val_term_matrix_df)
+print(i)
+print(paste0("The confusion matrix for kernel ",i," is below"))
+print(" ")
+print(confusionMatrix(as.factor(validation_classes),predictions, mode = "everything"))
+i = i*2
+print(" ")
+}
+
+
+
+
+```
+
+The cost hyperparameter that yields the highest F-1 score for class 0 is cost = 1.
+
+
+
+Optimizing hyperparameter for random forest (# of trees), looking for number of trees with best F-1 score for class 0.
+```{r}
+
+#Optimizing hyperparameter of number of trees
+
+print("Optimizing Random Forest Hyperparameter - # of trees")
+
+t = 200
+while (t <= 1000){
+  t_model_rf <- randomForest(class ~ .,data = training_term_matrix_df, ntree = t)
+  predictions <- predict(t_model_rf, newdata=val_term_matrix_df)
+  print(paste0("The confusion matrix for Random Forest with ",t," trees is below"))
+  print(" ")
+  print(confusionMatrix(as.factor(validation_classes),predictions, mode = "everything"))
+  t = t+200
+}
+
+```
+
+The optimum hyperparameter is 600 trees.
+
+Now, preparing the full training and evaluation datasets.
+
+```{r}
+
+#After best hyperparameters are obtained, splitting data again into training and evaluation
+
+split <- sample.split(full_dataset$class,SplitRatio = 0.8)
+
+#Creating new training and evaluation corpuses
+training_ngram_corpus <- subset(n_gram_corpus, split==TRUE)
+eval_ngram_corpus <- subset(n_gram_corpus, split==FALSE)
+
+#Creating new training and evaluation classes
+training_classes <- subset(full_dataset$class, split==TRUE)
+eval_classes <- subset(full_dataset$class, split==FALSE)
+
+#Creating new training DTM and removing sparse terms
+training_dct_matrix <- DocumentTermMatrix(training_ngram_corpus)
+training_dct_matrix_sparse <- removeSparseTerms(training_dct_matrix,0.995)
+
+#Creating evaluation DTM with sparse terms removed
+eval_dct_matrix_sparse <- DocumentTermMatrix(eval_ngram_corpus, list(dictionary=colnames(training_dct_matrix_sparse)))
+
+#Creating dataframes and making sure column names are in alignment
+training_term_matrix_df <- as.data.frame(as.matrix(training_dct_matrix_sparse))
+eval_term_matrix_df <- as.data.frame(as.matrix(eval_dct_matrix_sparse))
+colnames(training_term_matrix_df) <- make.names(colnames(training_term_matrix_df))
+colnames(eval_term_matrix_df) <- make.names(colnames(eval_term_matrix_df))
+
+#Attaching class labels to training dataframe
+training_term_matrix_df$class <- training_classes
+training_term_matrix_df$class <- as.factor(training_term_matrix_df$class)
+
+#Attaching class labels to evaluation dataframe
+eval_term_matrix_df$class <- eval_classes
+eval_term_matrix_df$class <- as.factor(eval_term_matrix_df$class)
+
+table(eval_term_matrix_df$class)
+
+
+
+```
+
+Training and evaluating SVM - see report for confusion matrix
+
+```{r}
+#Training SVM model
+trained_model <- svm(class ~., data=training_term_matrix_df,cost=1)
+
+#Making predictions with trained model on evaluation dataset
+predictions <- predict(trained_model, newdata=eval_term_matrix_df)
+
+#Printing confusion matrix
+print(confusionMatrix(as.factor(eval_classes),predictions,mode = "everything"))
+
+```
+
+
+Training and evaluating Naive Bayes - see report for confusion matrix
+
+```{r}
+
+#Using Naive Bayes classifier with Laplace smoothing value of 1
+#Training the model
+train_bayes_model <- naiveBayes(class ~ .,data = training_term_matrix_df, laplace = 1)
+class(train_bayes_model)
+#Testing the model on evaluation dataset
+bayes_test <- predict(train_bayes_model,eval_term_matrix_df)
+
+#Printing confusion matrix
+print(confusionMatrix(as.factor(eval_classes),bayes_test,mode = "everything"))
+```
+
+
+Training and evaluating Random Forest - see report for confusion matrix
+
+```{r}
+
+#Running Random Forest
+
+model_rf <- randomForest(class ~ .,data = training_term_matrix_df, ntree = 600)
+rf_test <- predict(model_rf,eval_term_matrix_df)
+class(rf_test)
+print(confusionMatrix(as.factor(eval_classes),rf_test,mode = "everything"))
+
+```
+
+Random Forest has the highest F-1 score for class 0 when run on the evaluation dataset, so it is being used for the unlabeled dataset. See report for full comparison between classifiers.
+
+Importing unlabeled dataset
+
+```{r}
+unlabeled_dataset <- read.csv('TADA_unlabeled_data_2024.csv')
+
+```
+
+Preprocessing 
+
+```{r}
+
+#Extracting only text from dataset
+unlabeled_texts <- unlabeled_dataset$text
+#Turning text into a corpus
+unlabeled_corpus <- VCorpus(VectorSource(unlabeled_texts))
+#Lowercasing all tweets
+unlabeled_corpus <- tm_map(unlabeled_corpus, content_transformer(tolower))
+
+#Removing URLS
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x) 
+unlabeled_corpus <- tm_map(unlabeled_corpus, content_transformer(removeURL))
+
+#Removing mentions
+unlabeled_corpus <- tm_map(unlabeled_corpus, content_transformer(function(x) gsub("@\\w+", "", x)))  
+
+#Removing punctuation
+unlabeled_corpus <- tm_map(unlabeled_corpus, removePunctuation)
+#Removing stopwords
+unlabeled_corpus <- tm_map(unlabeled_corpus, removeWords,stopwords("english"))
+#Stemming document
+unlabeled_corpus <- tm_map(unlabeled_corpus, stemDocument)
+
+
+
+#Getting length
+length(unlabeled_corpus)
+
+
+```
+
+
+Classifying unlabeled dataset with previously trained Random Forest model
+```{r}
+
+
+#Applying training column names to the unlabeled corpus
+unlb_dct_matrix_sparse  <- DocumentTermMatrix(unlabeled_corpus, list(dictionary=colnames(training_dct_matrix_sparse)))
+
+#Converting to dataframe
+unlb_df <- as.data.frame(as.matrix(unlb_dct_matrix_sparse))
+
+#Making sure column names are okay
+colnames(unlb_df) <- make.names(colnames(unlb_df))
+
+#Classifying unlabeled dataframe using previously trained model
+unlb_prd <- predict(model_rf,newdata = unlb_df)
+
+#Merging predictions back to unlabeled dataset to match classifications with geolocation and gender
+unlabeled_dataset$predictions <- unlb_prd 
+
+
+#Writing predictions to CSV
+write.csv(unlabeled_dataset, "unlabeled_predictions.csv")
+
+```
+
+Comparing distributions of four classes by city
+
+```{r}
+
+table(unlabeled_dataset$city)
+
+table(unlabeled_dataset$predictions)
+
+unlabeled_dataset$predictions <- as.factor(unlabeled_dataset$predictions)
+
+pop_a <- 500000
+pop_b <- 10000
+
+#Raw counts
+unlabeled_dataset %>%
+  group_by(city, predictions) %>%
+  summarise(count = n()) %>%
+  pivot_wider(names_from = predictions, values_from = count, values_fill = list(count = 0)) %>%
+  ungroup()
+
+table <- unlabeled_dataset %>%
+  select(city, predictions) %>%
+  tbl_summary(by=predictions, percent = "row") %>%
+  modify_spanning_header(all_stat_cols() ~ "Predicted class of drug-related chatter") 
+   
+
+table
+
+```
+
+
+
+Calculating population-adjusted drug-chatter rates for each city.
+```{r}
+population_data <- data.frame(
+  city = c("A", "B"),
+  population = c(500000, 10000)  
+)
+
+#Merging population to dataset
+unlabeled_dataset_p <- unlabeled_dataset %>%
+  left_join(population_data, by = "city")
+
+
+unlabeled_dataset_p
+
+
+unlabeled_dataset_p  <- unlabeled_dataset_p %>%
+  group_by(city, predictions) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+unlabeled_dataset_p$population <- as.numeric(unlabeled_dataset_p$population)
+
+adjusted_table <- unlabeled_dataset_p %>%
+  select(city, predictions, population) %>%
+  group_by(city, predictions) %>%
+  summarise(count = n(), .groups = "drop")
+
+adjusted_table_p <- adjusted_table %>%
+  left_join(population_data, by = "city")
+
+adjusted_table_p <- adjusted_table_p %>%
+  mutate(adjusted_rate = (count/population)*1000) %>%
+  ungroup()
+
+#Creating CSV with population-adjusted chatter rates per city
+write.csv(adjusted_table_p, "Adjusted_table.csv")
+
+adjusted_table_p
+
+
+
+```
+
+
+
+Looking at distribution of four classes by gender
+
+```{r}
+table_g <- unlabeled_dataset %>%
+  select(gender_id, predictions) %>%
+  tbl_summary(by=predictions, percent = "row") %>%
+  modify_spanning_header(all_stat_cols() ~ "Predicted class of drug-related chatter") 
+   
+
+table_g
+
+
+
+
+
+```
+
+
+Examining non-medical drug use by city and gender
+```{r}
+
+tw_0 <- unlabeled_dataset %>%
+  filter(predictions == 0) %>%
+  group_by(city, gender_id) %>%
+  summarise(tweet_count = n(), .groups = "drop")
+
+tw_0
+```
+
